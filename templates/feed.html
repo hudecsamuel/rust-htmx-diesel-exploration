@@ -1,0 +1,9 @@
+<!-- templates/index.html -->
+{% extends "base.html" %}
+
+{% block content %}
+<h1>{{ name }} , your feed is here</h1>
+<div id="list" hx-get="/todos" hx-target="this" hx-trigger="load" hx-swap="outerHTML">
+    Loading...
+</div>
+{% endblock %}
