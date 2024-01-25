@@ -1,80 +1,66 @@
-use diesel::sql_types::Binary;
+use crate::db::schema::sessions;
+use chrono::DateTime;
+use chrono::NaiveDateTime;
+use chrono::Utc;
+use diesel::pg::PgConnection;
+use diesel::upsert::excluded;
 use diesel::{
-    Insertable, QueryDsl, Queryable, RunQueryDsl,
-    Selectable, SelectableHelper, ExpressionMethods
+    ExpressionMethods, Insertable, QueryDsl, Queryable, RunQueryDsl, Selectable, SelectableHelper,
 };
-// use diesel::sql_types::Uuid;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tower_sessions::session::Record;
 use uuid::Uuid;
 
-use crate::db::schema::sessions;
-use crate::models::user::UserModel;
-// use crate::infra::errors::{adapt_infra_error, InfraError};
-use diesel::pg::PgConnection;
-use diesel::Queryable;
-
-#[derive(Serialize, Queryable, Selectable)]
+#[derive(Serialize, Queryable, Selectable, Insertable)]
 #[diesel(table_name = sessions)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SessionDb {
     pub id: String,
-    pub data: Binary,
-    pub expiry_date: OffsetDateTime,
+    pub data: Vec<u8>,
+    pub expiry_date: DateTime<Utc>,
 }
 
-#[derive(Deserialize, Insertable)]
-#[diesel(table_name = users)]
-pub struct NewUserDb {
-    pub name: String,
-    pub email: String,
-    pub password: String,
+pub fn save(connection: &mut PgConnection, record: &Record) -> Result<(), diesel::result::Error> {
+    let naive_datetime =
+        NaiveDateTime::from_timestamp_opt(record.expiry_date.unix_timestamp(), 0).unwrap();
+    let datetime: DateTime<Utc> = DateTime::from_naive_utc_and_offset(naive_datetime, Utc);
+
+    let new_session = SessionDb {
+        id: record.id.to_string(),
+        data: rmp_serde::to_vec(&record).map_err(|_| diesel::result::Error::RollbackTransaction)?,
+        expiry_date: datetime,
+    };
+
+    diesel::insert_into(sessions::table)
+        .values(&new_session)
+        .on_conflict(sessions::id)
+        .do_update()
+        .set((
+            sessions::data.eq(excluded(sessions::data)),
+            sessions::expiry_date.eq(excluded(sessions::expiry_date)),
+        ))
+        .execute(connection)?;
+
+    Ok(())
 }
 
-pub fn get_users(conn: &mut PgConnection) -> Result<Vec<UserModel>, diesel::result::Error> {
-    let result = users::table.select(UserDb::as_select()).get_results(conn)?;
+pub fn delete_expired(connection: &mut PgConnection) -> Result<(), diesel::result::Error> {
+    diesel::delete(sessions::table.filter(sessions::expiry_date.lt(Utc::now()))).execute(connection)?;
 
-    let users: Vec<UserModel> = result
-        .into_iter()
-        .map(|user_db| UserModel {
-            id: user_db.id,
-            name: user_db.name,
-            email: user_db.email,
-        })
-        .collect();
-
-    Ok(users)
+    Ok(())
 }
 
-pub fn create_user(
-    connection: &mut PgConnection,
-    user: NewUserDb,
-) -> Result<UserModel, diesel::result::Error> {
-    let result = diesel::insert_into(users::table)
-        .values(user)
-        .returning(UserDb::as_returning())
-        .get_result(connection)?;
+pub fn get_by_id(connection: &mut PgConnection, id: String) -> Result<SessionDb, diesel::result::Error> {
+    let session = sessions::table
+        .filter(sessions::id.eq(id))
+        .first::<SessionDb>(connection)?;
 
-    Ok(UserModel {
-        id: result.id,
-        name: result.name,
-        email: result.email,
-    })
+    Ok(session)
 }
 
-pub fn get_user_by_id(
-    connection: &mut PgConnection,
-    user_id: Uuid,
-) -> Result<UserModel, diesel::result::Error> {
-    let result = users::table
-        .select(UserDb::as_select())
-        .filter(users::id.eq(user_id))
-        .first::<UserDb>(connection)?;
+pub fn delete_by_id(connection: &mut PgConnection, id: String) -> Result<(), diesel::result::Error> {
+    diesel::delete(sessions::table.filter(sessions::id.eq(id))).execute(connection)?;
 
-    Ok(UserModel {
-        id: result.id,
-        name: result.name,
-        email: result.email,
-    })
+    Ok(())
 }
-

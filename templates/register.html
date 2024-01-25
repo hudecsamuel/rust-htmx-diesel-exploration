@@ -1,0 +1,15 @@
+<!-- templates/home.html -->
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Register</h1>
+<form id="register-form" hx-post="/register">
+    <label for="email">Email</label>
+    <input type="email" required name="email" />
+    <label for="name">Name</label>
+    <input type="text" required name="name" />
+    <label for="password">Password</label>
+    <input type="password" required name="password" />
+    <button type="submit">Login</button>
+</form>
+{% endblock %}

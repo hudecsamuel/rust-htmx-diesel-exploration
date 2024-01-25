@@ -1,27 +1,16 @@
 use async_trait::async_trait;
-use time::OffsetDateTime;
 use tower_sessions::{
     session::{Id, Record},
     session_store, ExpiredDeletion, SessionStore,
 };
+use crate::PgPool;
 
-use diesel::{
-    Insertable, QueryDsl, Queryable, RunQueryDsl,
-    Selectable, SelectableHelper, ExpressionMethods
-};
-// use diesel::sql_types::Uuid;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-use crate::db::schema::users;
-use crate::models::user::UserModel;
-// use crate::infra::errors::{adapt_infra_error, InfraError};
-use diesel::pg::PgConnection;
+use super::session_repository;
 
 /// A PostgreSQL session store.
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
-    pool: PgConnection,
+    pool: PgPool,
     schema_name: String,
     table_name: String,
 }
@@ -40,7 +29,7 @@ impl PostgresStore {
     /// let session_store = PostgresStore::new(pool);
     /// # })
     /// ```
-    pub fn new(pool: PgConnection) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
             schema_name: "sessions".to_string(),
@@ -52,10 +41,14 @@ impl PostgresStore {
 #[async_trait]
 impl ExpiredDeletion for PostgresStore {
     async fn delete_expired(&self) -> session_store::Result<()> {
-        let connection = self.pool.get().unwrap();
-        sessions::table
-            .filter(sessions::expiry_date.lt(OffsetDateTime::now_utc()))
-            .delete(self.pool);
+        let mut connection = self.pool.get().unwrap();
+
+        let results = tokio::task::spawn_blocking(move || {
+            session_repository::delete_expired(&mut connection)
+        })
+        .await
+        .unwrap();
+
         Ok(())
     }
 }
@@ -63,65 +56,38 @@ impl ExpiredDeletion for PostgresStore {
 #[async_trait]
 impl SessionStore for PostgresStore {
     async fn save(&self, record: &Record) -> session_store::Result<()> {
-        let query = format!(
-            r#"
-            insert into "{schema_name}"."{table_name}" (id, data, expiry_date)
-            values ($1, $2, $3)
-            on conflict (id) do update
-            set
-              data = excluded.data,
-              expiry_date = excluded.expiry_date
-            "#,
-            schema_name = self.schema_name,
-            table_name = self.table_name
-        );
-        sqlx::query(&query)
-            .bind(&record.id.to_string())
-            .bind(rmp_serde::to_vec(&record).map_err(SqlxStoreError::Encode)?)
-            .bind(record.expiry_date)
-            .execute(&self.pool)
-            .await
-            .map_err(SqlxStoreError::Sqlx)?;
+        let mut connection = self.pool.get().unwrap();
+
+        let record_close = record.clone();
+        let results =
+            tokio::task::spawn_blocking(move || session_repository::save(&mut connection, &record_close))
+                .await
+                .unwrap();
 
         Ok(())
     }
 
     async fn load(&self, session_id: &Id) -> session_store::Result<Option<Record>> {
-        let query = format!(
-            r#"
-            select data from "{schema_name}"."{table_name}"
-            where id = $1 and expiry_date > $2
-            "#,
-            schema_name = self.schema_name,
-            table_name = self.table_name
-        );
-        let record_value: Option<(Vec<u8>,)> = sqlx::query_as(&query)
-            .bind(session_id.to_string())
-            .bind(OffsetDateTime::now_utc())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(SqlxStoreError::Sqlx)?;
+        let mut connection = self.pool.get().unwrap();
 
-        if let Some((data,)) = record_value {
-            Ok(Some(
-                rmp_serde::from_slice(&data).map_err(SqlxStoreError::Decode)?,
-            ))
-        } else {
-            Ok(None)
-        }
+        let session_id = session_id.clone();
+        let session = tokio::task::spawn_blocking(move || {
+            session_repository::get_by_id(&mut connection, session_id.to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        Ok(Some(rmp_serde::from_slice(&session.data).unwrap()))
     }
 
     async fn delete(&self, session_id: &Id) -> session_store::Result<()> {
-        let query = format!(
-            r#"delete from "{schema_name}"."{table_name}" where id = $1"#,
-            schema_name = self.schema_name,
-            table_name = self.table_name
-        );
-        sqlx::query(&query)
-            .bind(&session_id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(SqlxStoreError::Sqlx)?;
+        let mut connection = self.pool.get().unwrap();
+
+        let session_id = session_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            session_repository::delete_by_id(&mut connection, session_id.to_string())
+        }).await;
 
         Ok(())
     }

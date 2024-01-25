@@ -1,0 +1,13 @@
+<!-- templates/home.html -->
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Login</h1>
+<form id="login-form" hx-post="/login">
+    <label for="email">Email</label>
+    <input type="email" required name="email" />
+    <label for="password">Password</label>
+    <input type="password" required name="password" />
+    <button type="submit">Login</button>
+</form>
+{% endblock %}

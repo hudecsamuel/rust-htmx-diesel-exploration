@@ -1,9 +1,15 @@
 use axum::Router;
+use axum_login::{AuthManagerLayerBuilder, login_required};
 use log::info;
+use time::Duration;
+use tower_sessions::{Expiry, SessionManagerLayer};
 // use serde::{Deserialize, Serialize};
 use std::env;
 // use tokio::signal;
-use crate::controllers::home_controller;
+use crate::{
+    controllers::{home_controller, auth_controller},
+    repositories::{postgres_store::PostgresStore, auth_backend::Backend},
+};
 use diesel::{
     pg::PgConnection,
     r2d2::{ConnectionManager, Pool},
@@ -15,7 +21,7 @@ mod models;
 mod repositories;
 mod templates;
 
-type PgPool = Pool<ConnectionManager<PgConnection>>;
+pub type PgPool = Pool<ConnectionManager<PgConnection>>;
 
 // Struct to hold the application state
 #[derive(Clone)]
@@ -62,10 +68,26 @@ async fn main() {
         ))
         .expect("Failed to create pool.");
 
-    let state = AppState { pool: db_pool };
+    let state = AppState { pool: db_pool.clone() };
+
+    let session_store = PostgresStore::new(db_pool.clone());
+
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_secure(false)
+        .with_expiry(Expiry::OnInactivity(Duration::days(1)));
+
+    // Auth service.
+    //
+    // This combines the session layer with our backend to establish the auth
+    // service which will provide the auth session as a request extension.
+    let backend = Backend::new(db_pool.clone());
+    let auth_layer = AuthManagerLayerBuilder::new(backend, session_layer).build();
 
     let app = Router::new()
         .merge(home_controller::router())
+        .merge(auth_controller::router())
+        // .route_layer(login_required!(Backend, login_url = "/login"))
+        .layer(auth_layer)
         .with_state(state);
 
     // run our app with hyper, listening globally on port 3000
